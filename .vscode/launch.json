@@ -5,13 +5,12 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb-vscode",
+            "type": "lldb",
             "request": "launch",
             "name": "Debug",
-            "program": "${workspaceRoot}/tester",
-            "args": [ "-w", "traces/random-input", "-s", "1024"],
-            "env": [],
-            "cwd": "${workspaceRoot}"
+            "program": "${workspaceFolder}/tester",
+            "args": ["-w", "traces/random-input", "-s", "1024"],
+            "cwd": "${workspaceFolder}"
         }
     ]
 }

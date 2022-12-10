@@ -26,6 +26,9 @@ static bool nread(int fd, int len, uint8_t *buf) {
       return false;
     }
     bytes_read += bytes;
+    if (bytes_read - bytes == 0) {
+      break;
+    }
   }
   return true;
 }
@@ -42,6 +45,9 @@ static bool nwrite(int fd, int len, uint8_t *buf) {
       return false;
     }
     bytes_written += bytes;
+    if (bytes_written == bytes) {
+      break;
+    }
   }
   return true;
 }
@@ -61,23 +67,18 @@ and then use the length field in the header to determine whether it is needed to
 a block of data from the server. You may use the above nread function here.  
 */
 static bool recv_packet(int sd, uint32_t *op, uint8_t *ret, uint8_t *block) {
-  uint8_t* packet = malloc(261);
-  if(!nread(sd,261, packet)) {
-    free(packet);
-    return false;
-  }
-  *packet = (uint8_t) ntohs(*packet);
+  uint8_t* header = malloc(5);
 
-  memcpy(op,&packet[257],4);
-  memcpy(ret,&packet[256],1);
+  nread(sd, HEADER_LEN, header);
+  memcpy(op,header,4);
+  *op = ntohl(*op);
+  memcpy(ret,&header[4],1);
 
-  
-  
   if ((*ret >> 1) == (uint8_t) 1) {
-  memcpy(block,packet,256);
+  nread(sd,256,block);
   }
 
-  free(packet);
+  free(header);
   return true;
 }
 
@@ -95,7 +96,8 @@ You may call the above nwrite function to do the actual sending.
 */
 static bool send_packet(int sd, uint32_t op, uint8_t *block) {
   uint8_t* packet = malloc(261);
-  memcpy(&packet[257],&op,4);
+  op = htonl(op);
+  memcpy(packet,&op,4);
   uint8_t infoCode = 0;
   bool blockExists = false;
 
@@ -108,18 +110,14 @@ static bool send_packet(int sd, uint32_t op, uint8_t *block) {
 
 
 
-  memcpy(&packet[256],&infoCode,1);
+  memcpy(&packet[4],&infoCode,1);
   
   if (blockExists) {
-    memcpy(packet,block,256);
+    memcpy(&packet[5],block,256);
   }
   
-  uint8_t* coded_packet = malloc(261);
-  *coded_packet = htons(*packet);
-  
-  bool checker = nwrite(sd,261,coded_packet);
+  bool checker = nwrite(sd,261,packet);
   free(packet);
-  free(coded_packet);
 
   return checker;
 }
