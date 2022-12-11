@@ -18,16 +18,13 @@ int cli_sd = -1;
 It may need to call the system call "read" multiple times to reach the given size len. 
 */
 static bool nread(int fd, int len, uint8_t *buf) {
-  int bytes_read = 0;
+  int bytes_read = 0;  // This variable accounts for the bytes read until a certain point.
   
-  while (bytes_read < len) {
+  while (bytes_read < len) {  // While loop is in place to make sure all bytes are read.
     int bytes = read(fd, &buf[bytes_read], len-bytes_read);
-    if (bytes == -1) {
-      return false;
-    }
-    bytes_read += bytes;
-    if (bytes_read - bytes == 0) {
-      break;
+    bytes_read += bytes;  // Number of bytes read until this point is tracked.
+    if (bytes_read >= len) { // Makes sure that the while loop is terminated when the correct number of bytes is read.
+      return true;
     }
   }
   return true;
@@ -37,16 +34,13 @@ static bool nread(int fd, int len, uint8_t *buf) {
 It may need to call the system call "write" multiple times to reach the size len.
 */
 static bool nwrite(int fd, int len, uint8_t *buf) {
-  int bytes_written = 0;
+  int bytes_written = 0; // This variable accounts for the bytes written to until a certain point.
   
-  while (bytes_written < len) {
+  while (bytes_written < len) { // While loop is in place to make sure all bytes are written.
     int bytes = write(fd, &buf[bytes_written], len-bytes_written);
-    if (bytes == -1) {
-      return false;
-    }
-    bytes_written += bytes;
-    if (bytes_written == bytes) {
-      break;
+    bytes_written += bytes; // Number of bytes written until this point is tracked.
+    if (bytes_written >= len) { // Makes sure that the while loop is terminated when the correct number of bytes is written to.
+      return true;
     }
   }
   return true;
@@ -67,17 +61,23 @@ and then use the length field in the header to determine whether it is needed to
 a block of data from the server. You may use the above nread function here.  
 */
 static bool recv_packet(int sd, uint32_t *op, uint8_t *ret, uint8_t *block) {
-  uint8_t* header = malloc(5);
+  uint8_t* header = malloc(HEADER_LEN);  // Header is malloced to provide space for the read operation to execute.
 
-  nread(sd, HEADER_LEN, header);
-  memcpy(op,header,4);
-  *op = ntohl(*op);
-  memcpy(ret,&header[4],1);
-
-  if ((*ret >> 1) == (uint8_t) 1) {
-  nread(sd,256,block);
+  if (!nread(sd, HEADER_LEN, header)) { // The nread is wrapped in the if statement to account for fails.
+    free(header);
+    return false;
   }
 
+  memcpy(op,header,4);
+  *op = ntohl(*op);  // The opcode is converted back to a regular byte.
+  memcpy(ret,&header[4],1);
+
+  if ((*ret >> 1) == 0) {  // This bitshift is to access the second-last bit of the ret byte, and determine if we need to access data.
+    free(header);
+    return true;
+  }
+
+  nread(sd,JBOD_BLOCK_SIZE,block); // Rest of the read operation is conducted.
   free(header);
   return true;
 }
@@ -95,29 +95,30 @@ The above information (when applicable) has to be wrapped into a jbod request pa
 You may call the above nwrite function to do the actual sending.  
 */
 static bool send_packet(int sd, uint32_t op, uint8_t *block) {
-  uint8_t* packet = malloc(261);
-  op = htonl(op);
+  uint8_t* packet = malloc(HEADER_LEN + JBOD_BLOCK_SIZE); // Packet is malloced to provide space for the read operation to execute.
+  op = htonl(op);  // op is converted to a netbyte.
+  
   memcpy(packet,&op,4);
-  uint8_t infoCode = 0;
-  bool blockExists = false;
+  uint8_t infoCode = 0; // Initialization of the infocode.
+  bool blockExists = false; // Initialization of boolean to determine if block needs to be sent.
 
-  if (block != NULL) {
+  if (block != NULL) { // If statement checks if write operation is being conducted, and initializes variables accordingly.
     blockExists = true;
-  }
-  else {
     infoCode = 2;
   }
 
 
-
+  bool checker; // Checker determines what is returned at the end of the operation.
   memcpy(&packet[4],&infoCode,1);
   
   if (blockExists) {
-    memcpy(&packet[5],block,256);
+    memcpy(&packet[5],block,JBOD_BLOCK_SIZE);
+    checker = nwrite(sd,HEADER_LEN + JBOD_BLOCK_SIZE,packet);  // Write operation is conducted on the packet with data.
   }
-  
-  bool checker = nwrite(sd,261,packet);
-  free(packet);
+  else {
+    checker = nwrite(sd,HEADER_LEN,packet);  // Write operation is conducted on the packet without data.
+  }
+  free(packet); // Packet is freed before return.
 
   return checker;
 }
@@ -130,6 +131,7 @@ static bool send_packet(int sd, uint32_t op, uint8_t *block) {
  * you will not call it in mdadm.c
 */
 bool jbod_connect(const char *ip, uint16_t port) {
+  /* Function as a whole connects to the server by creating a socket and binding it to the server. */
   struct sockaddr_in caddr;
 
   caddr.sin_family = AF_INET;
@@ -170,29 +172,29 @@ The meaning of each parameter is the same as in the original jbod_operation func
 return: 0 means success, -1 means failure.
 */
 int jbod_client_operation(uint32_t op, uint8_t *block) {
-  uint32_t* rop = malloc(4);
-  uint8_t* rret = malloc(1);
-  uint8_t signifier;
+  uint32_t* rop = malloc(4); // Variable to store returned op code.
+  uint8_t* rret = malloc(1); // Variable to store returned ret value.
+  uint8_t signifier; // Signifier is initialized, and will store last bit of rret value.
 
-  bool returned = send_packet(cli_sd,op,block);
+  bool returned = send_packet(cli_sd,op,block); // Packet is sent.
 
-  if (returned == false) {
+  if (returned == false) { // Check is conducted to determine if packet was sent.
     return -1;
   }
 
-  returned = recv_packet(cli_sd,rop,rret,block);
+  returned = recv_packet(cli_sd,rop,rret,block); // Packet is received.
 
-  if (returned == false) {
+  if (returned == false) { // Check is conducted to determine if the packet was received.
     return -1;
   }
 
-  signifier = (*rret >> 1);
-  free(rop);
-  free(rret);
+  signifier = ((*rret << 7) >> 7); // Bit manipulation is conducted to isolate rightmost bit.
+  free(rop); // Value is freed as it isn't useful anymore.
+  free(rret); // Value is freed as it isn't useful anymore.
 
-  if (signifier == (uint8_t) 1) {
+  if (signifier == (uint8_t) 1) { // Signifier determines return value.
     return -1;
   } else {
-    return 1;
+    return 0;
   }
 }
