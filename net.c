@@ -18,14 +18,32 @@ int cli_sd = -1;
 It may need to call the system call "read" multiple times to reach the given size len. 
 */
 static bool nread(int fd, int len, uint8_t *buf) {
-  return false;
+  int bytes_read = 0;  // This variable accounts for the bytes read until a certain point.
+  
+  while (bytes_read < len) {  // While loop is in place to make sure all bytes are read.
+    int bytes = read(fd, &buf[bytes_read], len-bytes_read);
+    bytes_read += bytes;  // Number of bytes read until this point is tracked.
+    if (bytes_read >= len) { // Makes sure that the while loop is terminated when the correct number of bytes is read.
+      return true;
+    }
+  }
+  return true;
 }
 
 /* attempts to write n bytes to fd; returns true on success and false on failure 
 It may need to call the system call "write" multiple times to reach the size len.
 */
 static bool nwrite(int fd, int len, uint8_t *buf) {
-  return false;
+  int bytes_written = 0; // This variable accounts for the bytes written to until a certain point.
+  
+  while (bytes_written < len) { // While loop is in place to make sure all bytes are written.
+    int bytes = write(fd, &buf[bytes_written], len-bytes_written);
+    bytes_written += bytes; // Number of bytes written until this point is tracked.
+    if (bytes_written >= len) { // Makes sure that the while loop is terminated when the correct number of bytes is written to.
+      return true;
+    }
+  }
+  return true;
 }
 
 /* Through this function call the client attempts to receive a packet from sd 
@@ -43,6 +61,25 @@ and then use the length field in the header to determine whether it is needed to
 a block of data from the server. You may use the above nread function here.  
 */
 static bool recv_packet(int sd, uint32_t *op, uint8_t *ret, uint8_t *block) {
+  uint8_t* header = malloc(HEADER_LEN);  // Header is malloced to provide space for the read operation to execute.
+
+  if (!nread(sd, HEADER_LEN, header)) { // The nread is wrapped in the if statement to account for fails.
+    free(header);
+    return false;
+  }
+
+  memcpy(op,header,4);
+  *op = ntohl(*op);  // The opcode is converted back to a regular byte.
+  memcpy(ret,&header[4],1);
+
+  if ((*ret >> 1) == 0) {  // This bitshift is to access the second-last bit of the ret byte, and determine if we need to access data.
+    free(header);
+    return true;
+  }
+
+  nread(sd,JBOD_BLOCK_SIZE,block); // Rest of the read operation is conducted.
+  free(header);
+  return true;
 }
 
 
@@ -58,6 +95,32 @@ The above information (when applicable) has to be wrapped into a jbod request pa
 You may call the above nwrite function to do the actual sending.  
 */
 static bool send_packet(int sd, uint32_t op, uint8_t *block) {
+  uint8_t* packet = malloc(HEADER_LEN + JBOD_BLOCK_SIZE); // Packet is malloced to provide space for the read operation to execute.
+  op = htonl(op);  // op is converted to a netbyte.
+  
+  memcpy(packet,&op,4);
+  uint8_t infoCode = 0; // Initialization of the infocode.
+  bool blockExists = false; // Initialization of boolean to determine if block needs to be sent.
+
+  if (block != NULL) { // If statement checks if write operation is being conducted, and initializes variables accordingly.
+    blockExists = true;
+    infoCode = 2;
+  }
+
+
+  bool checker; // Checker determines what is returned at the end of the operation.
+  memcpy(&packet[4],&infoCode,1);
+  
+  if (blockExists) {
+    memcpy(&packet[5],block,JBOD_BLOCK_SIZE);
+    checker = nwrite(sd,HEADER_LEN + JBOD_BLOCK_SIZE,packet);  // Write operation is conducted on the packet with data.
+  }
+  else {
+    checker = nwrite(sd,HEADER_LEN,packet);  // Write operation is conducted on the packet without data.
+  }
+  free(packet); // Packet is freed before return.
+
+  return checker;
 }
 
 
@@ -68,6 +131,27 @@ static bool send_packet(int sd, uint32_t op, uint8_t *block) {
  * you will not call it in mdadm.c
 */
 bool jbod_connect(const char *ip, uint16_t port) {
+  /* Function as a whole connects to the server by creating a socket and binding it to the server. */
+  struct sockaddr_in caddr;
+
+  caddr.sin_family = AF_INET;
+  caddr.sin_port = htons(port);
+  
+  if (inet_aton(ip, &caddr.sin_addr) == 0) {
+    return false;
+  }
+
+  cli_sd = socket(PF_INET, SOCK_STREAM, 0);
+  if (cli_sd == -1) {
+    printf("Error on socket creation [%s]\n", strerror(errno));
+    return false;
+  }
+
+  if (connect(cli_sd, (const struct sockaddr *)&caddr, sizeof(caddr)) == -1) {
+    printf("Error on socket connect [%s]\n", strerror(errno));
+    return false;
+  }
+  return true;
 }
 
 
@@ -75,6 +159,8 @@ bool jbod_connect(const char *ip, uint16_t port) {
 
 /* disconnects from the server and resets cli_sd */
 void jbod_disconnect(void) {
+  close(cli_sd);
+  cli_sd = -1;
 }
 
 
@@ -86,4 +172,29 @@ The meaning of each parameter is the same as in the original jbod_operation func
 return: 0 means success, -1 means failure.
 */
 int jbod_client_operation(uint32_t op, uint8_t *block) {
+  uint32_t* rop = malloc(4); // Variable to store returned op code.
+  uint8_t* rret = malloc(1); // Variable to store returned ret value.
+  uint8_t signifier; // Signifier is initialized, and will store last bit of rret value.
+
+  bool returned = send_packet(cli_sd,op,block); // Packet is sent.
+
+  if (returned == false) { // Check is conducted to determine if packet was sent.
+    return -1;
+  }
+
+  returned = recv_packet(cli_sd,rop,rret,block); // Packet is received.
+
+  if (returned == false) { // Check is conducted to determine if the packet was received.
+    return -1;
+  }
+
+  signifier = ((*rret << 7) >> 7); // Bit manipulation is conducted to isolate rightmost bit.
+  free(rop); // Value is freed as it isn't useful anymore.
+  free(rret); // Value is freed as it isn't useful anymore.
+
+  if (signifier == (uint8_t) 1) { // Signifier determines return value.
+    return -1;
+  } else {
+    return 0;
+  }
 }
